@@ -169,12 +169,16 @@ public:
         throw std::logic_error("Not implemented");
     }
 
-protected:
-    virtual void schedule(Func func, Duration dur) {
-        return schedule(func, dur,
-                        static_cast<uint64_t>(Executor::Priority::DEFAULT),
-                        nullptr);
+    // Schedule a function after a duration. Returns false if schedule failed.
+    // The 4-arg overload with Slot* cancellation support remains protected.
+    virtual bool schedule(Func func, Duration dur) {
+        schedule(func, dur,
+                 static_cast<uint64_t>(Executor::Priority::DEFAULT),
+                 nullptr);
+        return true;
     }
+
+protected:
     virtual void schedule(Func func, Duration dur, uint64_t schedule_info,
                           Slot *slot = nullptr) {
         std::thread([this, func = std::move(func), dur, slot]() {

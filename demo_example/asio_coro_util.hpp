@@ -164,11 +164,12 @@ public:
     }
 
 private:
-    void schedule(Func func, Duration dur) override {
+    bool schedule(Func func, Duration dur) override {
         auto timer = std::make_unique<asio::steady_timer>(executor_, dur);
         auto tm = timer.get();
         tm->async_wait([fn = std::move(func),
                         timer = std::move(timer)](auto ec) { fn(); });
+        return true;
     }
 };
 

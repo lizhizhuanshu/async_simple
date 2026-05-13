@@ -32,12 +32,14 @@
 #include <thread>
 #include <vector>
 #include <cstdlib>
+#include <queue>
 
 #include "async_simple/util/Queue.h"
 
 #endif  // ASYNC_SIMPLE_USE_MODULES
 
 namespace async_simple::util {
+
 class ThreadPool {
 public:
     struct WorkItem {
@@ -64,6 +66,10 @@ public:
 
     ThreadPool::ERROR_TYPE scheduleById(std::function<void()> fn,
                                         int32_t id = -1);
+    template <typename Rep, typename Period>
+    ThreadPool::ERROR_TYPE scheduleById(
+        std::function<void()> fn, int32_t id,
+        std::chrono::duration<Rep, Period> delay);
     int32_t getCurrentId() const;
     size_t getItemCount() const;
     int32_t getThreadNum() const { return _threadNum; }
@@ -78,6 +84,20 @@ private:
     std::atomic<bool> _stop;
     bool _enableWorkSteal;
     bool _enableCoreBindings;
+
+    // Timed work item for delayed scheduling.
+    struct TimedWorkItem {
+        std::chrono::steady_clock::time_point deadline;
+        mutable WorkItem item;  // mutable: priority_queue::top() returns const&
+
+        bool operator>(const TimedWorkItem &other) const {
+            return deadline > other.deadline;
+        }
+    };
+
+    std::priority_queue<TimedWorkItem, std::vector<TimedWorkItem>,
+                        std::greater<TimedWorkItem>> _delayedQueue;
+    mutable std::mutex _delayedMutex;
 };
 
 #ifdef __linux__
@@ -104,8 +124,20 @@ inline ThreadPool::ThreadPool(size_t threadNum, bool enableWorkSteal,
         current->second = this;
         while (true) {
             WorkItem workerItem = {};
-            if (_enableWorkSteal) {
-                // Try to do work steal firstly.
+
+            // 1. Check for due delayed tasks.
+            {
+                std::scoped_lock lock(_delayedMutex);
+                auto now = std::chrono::steady_clock::now();
+                if (!_delayedQueue.empty() &&
+                    _delayedQueue.top().deadline <= now) {
+                    workerItem = std::move(_delayedQueue.top().item);
+                    _delayedQueue.pop();
+                }
+            }
+
+            // 2. Try to do work steal.
+            if (!workerItem.fn && _enableWorkSteal) {
                 for (auto n = 0; n < _threadNum * 2; ++n) {
                     if (_queues[(id + n) % _threadNum].try_pop_if(
                             workerItem,
@@ -114,16 +146,35 @@ inline ThreadPool::ThreadPool(size_t threadNum, bool enableWorkSteal,
                 }
             }
 
-            if (!workerItem.fn && !_queues[id].pop(workerItem)) {
-                // If thread is going to stop, don't wait for any new task any
-                // more. Otherwise wait for a pop task if _enableWorkSteal false
-                // or work steal failed,
+            // 3. Try immediate task from own queue.
+            if (!workerItem.fn && !_queues[id].try_pop(workerItem)) {
+                // No immediate task. Decide wait strategy.
+                std::chrono::steady_clock::time_point deadline;
+                bool hasDelayed = false;
+                {
+                    std::scoped_lock lock(_delayedMutex);
+                    if (!_delayedQueue.empty()) {
+                        hasDelayed = true;
+                        deadline = _delayedQueue.top().deadline;
+                    }
+                }
+
+                if (hasDelayed) {
+                    // Wake on new immediate task or deadline.
+                    _queues[id].try_pop_until(workerItem, deadline);
+                } else {
+                    // No delayed tasks. Block until new task or stop.
+                    if (!_queues[id].pop(workerItem)) {
+                        if (_stop)
+                            break;
+                        else
+                            continue;
+                    }
+                }
+
                 if (_stop)
                     break;
-                else
-                    continue;
             }
-
             if (workerItem.fn)
                 workerItem.fn();
         }
@@ -198,6 +249,32 @@ inline ThreadPool::ERROR_TYPE ThreadPool::scheduleById(std::function<void()> fn,
         assert(id < _threadNum);
         _queues[id].push(WorkItem{/*canSteal = */ false, std::move(fn)});
     }
+
+    return ERROR_NONE;
+}
+
+template <typename Rep, typename Period>
+inline ThreadPool::ERROR_TYPE ThreadPool::scheduleById(
+    std::function<void()> fn, int32_t id,
+    std::chrono::duration<Rep, Period> delay) {
+    if (nullptr == fn) {
+        return ERROR_POOL_ITEM_IS_NULL;
+    }
+
+    if (_stop) {
+        return ERROR_POOL_HAS_STOP;
+    }
+
+    auto deadline = std::chrono::steady_clock::now() + delay;
+    {
+        std::scoped_lock lock(_delayedMutex);
+        _delayedQueue.push({deadline, {false, std::move(fn)}});
+    }
+
+    // Wake a worker: push a no-op to transition idle workers
+    // from indefinite wait to timed wait on the delayed queue.
+    int notifyId = (id == -1) ? (std::rand() % _threadNum) : id;
+    _queues[notifyId].push(WorkItem{/*canSteal = */ false, /*fn = */ nullptr});
 
     return ERROR_NONE;
 }

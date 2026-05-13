@@ -57,6 +57,10 @@ public:
         return _pool.scheduleById(std::move(func)) ==
                util::ThreadPool::ERROR_NONE;
     }
+    bool schedule(Func func, Executor::Duration dur) override {
+        return _pool.scheduleById(std::move(func), -1, dur) ==
+               util::ThreadPool::ERROR_NONE;
+    }
     bool currentThreadInExecutor() const override {
         return _pool.getCurrentId() != -1;
     }

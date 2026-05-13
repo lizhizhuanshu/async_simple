@@ -25,6 +25,7 @@
 #define ASYNC_SIMPLE_QUEUE_H
 
 #ifndef ASYNC_SIMPLE_USE_MODULES
+#include <chrono>
 #include <condition_variable>
 #include <mutex>
 #include <queue>
@@ -101,6 +102,24 @@ public:
         std::scoped_lock guard(_mutex);
         return _queue.empty();
     }
+
+    // Pop with deadline. Returns false if deadline reached without an item.
+    template <typename Clock, typename Duration>
+    bool try_pop_until(
+        T &item,
+        const std::chrono::time_point<Clock, Duration> &deadline) {
+        std::unique_lock lock(_mutex);
+        _cond.wait_until(lock, deadline,
+                         [&]() { return !_queue.empty() || _stop; });
+        if (_queue.empty())
+            return false;
+        item = std::move(_queue.front());
+        _queue.pop();
+        return true;
+    }
+
+    // Wake one waiting thread without pushing an item.
+    void notify_one() { _cond.notify_one(); }
 
     void stop() {
         {

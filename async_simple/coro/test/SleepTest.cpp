@@ -92,12 +92,13 @@ TEST_F(SleepTest, testSleep) {
         public:
             Executor() = default;
             virtual bool schedule(Func) override { return true; }
-            virtual void schedule(Func func, Duration dur) override {
+            virtual bool schedule(Func func, Duration dur) override {
                 std::thread([this, func = std::move(func), dur]() {
                     id = std::this_thread::get_id();
                     std::this_thread::sleep_for(dur);
                     func();
                 }).detach();
+                return true;
             }
             virtual void schedule(Func func, Duration dur, uint64_t,
                                   Slot*) override {
