@@ -182,11 +182,18 @@ protected:
     virtual void schedule(Func func, Duration dur, uint64_t schedule_info,
                           Slot *slot = nullptr) {
         std::thread([this, func = std::move(func), dur, slot]() {
-            auto promise = std::make_unique<std::promise<void>>();
+            // The promise must outlive the (possibly discarded) cancellation
+            // callback. When slot == nullptr, tryEmplace() drops the callback
+            // without storing it; if the callback owned the promise (by move),
+            // destroying it would set the shared state to broken_promise and
+            // future.wait_for(dur) would return immediately instead of waiting
+            // for dur. Share the promise so this scope keeps it alive for the
+            // full wait_for; the callback still fulfills it on cancellation.
+            auto promise = std::make_shared<std::promise<void>>();
             auto future = promise->get_future();
             bool hasnt_canceled = signalHelper{Terminate}.tryEmplace(
-                slot, [p = std::move(promise)](SignalType, Signal *) {
-                    p->set_value();
+                slot, [promise](SignalType, Signal *) {
+                    promise->set_value();
                 });
             if (hasnt_canceled)
                 future.wait_for(dur);
